@@ -1083,39 +1083,28 @@ KEY FINDINGS
     st.text_area("Report", report_text, height=400)
 
     st.divider()
-    st.subheader("Downloads")
+    st.subheader("Download All Results")
 
-    c1, c2, c3, c4 = st.columns(4)
+    # Build ZIP in memory — single button, no page refresh
+    import zipfile, io as _io
+    _zip_buf = _io.BytesIO()
+    with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+        _zf.writestr("ship_motion_report.txt",      report_text)
+        _zf.writestr("imu_cleaned_resampled.csv",   df_clean.to_csv(index=False))
+        _zf.writestr("results_horizon_study.csv",   hor_df.to_csv(index=False))
+        _zf.writestr("results_stats_all.csv",       stat_df.to_csv(index=False))
+    _zip_buf.seek(0)
 
-    with c1:
-        st.download_button(
-            "Download cleaned CSV",
-            data=df_clean.to_csv(index=False),
-            file_name="imu_cleaned_resampled.csv",
-            key="dl_cleaned",
-            mime="text/csv",
-        )
-    with c2:
-        st.download_button(
-            "Download horizon results",
-            data=hor_df.to_csv(index=False),
-            file_name="results_horizon_study.csv",
-            key="dl_horizon",
-            mime="text/csv",
-        )
-    with c3:
-        st.download_button(
-            "Download stat results",
-            data=stat_df.to_csv(index=False),
-            file_name="results_stats_all.csv",
-            key="dl_stats",
-            mime="text/csv",
-        )
-    with c4:
-        st.download_button(
-            "Download report (.txt)",
-            data=report_text,
-            file_name="ship_motion_report.txt",
-            key="dl_report",
-            mime="text/plain",
-        )
+    st.download_button(
+        label="Download all results as ZIP",
+        data=_zip_buf.getvalue(),
+        file_name="ship_motion_results.zip",
+        mime="application/zip",
+        key="dl_all_zip",
+        use_container_width=True,
+        type="primary",
+    )
+    st.caption(
+        "ZIP contains: ship_motion_report.txt · imu_cleaned_resampled.csv · "
+        "results_horizon_study.csv · results_stats_all.csv"
+    )
