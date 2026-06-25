@@ -602,7 +602,21 @@ with tab3:
             plt.close()
 
     st.subheader("Final results table")
-    st.dataframe(hor_sum.round(4), use_container_width=True, hide_index=True)
+    st.caption(
+        "pitch_mean = average pitch MAE across windows · "
+        "pitch_std = variation in that MAE across windows · "
+        "pitch_rmse = root mean square error (larger errors penalised more)"
+    )
+    hor_display = hor_sum.rename(columns={
+        "horizon_sec" : "Horizon (s)",
+        "pitch_mean"  : "Pitch MAE avg (°)",
+        "pitch_std"   : "Pitch MAE std (°)",
+        "roll_mean"   : "Roll MAE avg (°)",
+        "roll_std"    : "Roll MAE std (°)",
+        "pitch_rmse"  : "Pitch RMSE (°)",
+        "roll_rmse"   : "Roll RMSE (°)",
+    }).round(4)
+    st.dataframe(hor_display, use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 4 — Statistics (Peak / RMS / H1/3)
@@ -653,6 +667,10 @@ with tab4:
 
     st.divider()
     st.subheader("NATO STANAG 4154 — Helicopter operation check")
+    st.caption(
+        "This RMS is the roughness of the actual sea — computed from the real IMU signal, "
+        "not from prediction errors. It answers: is the sea calm enough for helicopter landing today?"
+    )
     roll_rms  = float(np.sqrt(np.mean(df_clean["roll_deg"].values ** 2)))
     pitch_rms = float(np.sqrt(np.mean(df_clean["pitch_deg"].values ** 2)))
     cc1, cc2 = st.columns(2)
