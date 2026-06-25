@@ -1,8 +1,7 @@
 """
 Ship Motion Forecasting — Streamlit Web App
 Converted from ship_motion_final_Dr_Suresh.ipynb
-Upload IMU CSV → preprocessing → TimesFM zero-shot forecast → results
-"""
+Upload IMU CSV → preprocessing → TimesFM zero-shot forecast → results """
 
 import io
 import warnings
@@ -102,7 +101,7 @@ with st.sidebar:
         "Context window (history used)",
         [60, 120, 180, 240, 360],
         index=1,
-        format_func=lambda x: f"{x}s — {x//60} min of history",
+        format_func=lambda x: f"{x}s - {x//60} min of history",
     )
     horizon_sec = st.selectbox(
         "Forecast horizon (how far ahead)",
@@ -456,9 +455,7 @@ with tab0:
                 ax.set_xlabel("Time (s)  [0 = start of context window]")
                 ax.set_ylabel(f"{sig_label} (deg)")
                 ax.set_title(
-                    f"{sig_label} — Actual context + Forward prediction
-"
-                    f"Context = last {lp_ctx_sec}s of uploaded data"
+                    f"{sig_label} - Actual context + Forward prediction - Context = last {lp_ctx_sec}s"
                 )
                 ax.legend(fontsize=8, loc="upper left",
                           ncol=min(4, len(lp_horizons_sorted)+1))
@@ -553,11 +550,10 @@ with tab0:
                 ax.set_xticklabels([f"{h}s" for h in lp_horizons_sorted])
                 ax.set_xlabel("Forecast Horizon")
                 ax.set_ylabel("Predicted amplitude (deg)")
-                ax.set_title(f"{sig_label} — Predicted Stats by Horizon")
+                ax.set_title(f"{sig_label} - Predicted Stats by Horizon")
                 ax.legend(fontsize=9)
             plt.suptitle(
-                "Live Prediction — Statistical Summary
-"
+                "Live Prediction — Statistical Summary "
                 "All values are predictions (no ground truth available)",
                 fontsize=12)
             plt.tight_layout()
@@ -648,9 +644,9 @@ with tab1:
     c8.metric("Max gap",  f"{dt.max():.4f} s")
 
     if CV > 0.05:
-        st.warning(f"CV = {CV:.4f} — significant jitter detected. Resampling to exact 20 Hz was applied automatically.")
+        st.warning(f"CV = {CV:.4f} - significant jitter detected. Resampling to exact 20 Hz was applied automatically.")
     else:
-        st.success(f"CV = {CV:.4f} — timestamps near-uniform.")
+        st.success(f"CV = {CV:.4f} - timestamps near-uniform.")
 
     st.divider()
     st.subheader("Signal statistics")
@@ -715,7 +711,7 @@ with tab1:
             ax.set_xlim([0, 2.0])
             ax.set_xlabel("Frequency (Hz)")
             ax.set_ylabel("PSD (deg²/Hz)")
-            ax.set_title(f"{col} — {lbl}")
+            ax.set_title(f"{col} - {lbl}")
             mask = (f > 0.005) & (f < 2.0)
             for pi in np.argsort(p[mask])[::-1][:3]:
                 fi = f[mask][pi]
@@ -821,7 +817,7 @@ with tab3:
         ax.set_ylabel(label)
         ax.set_title(label.replace(" (deg)","") + " — MAE vs Horizon")
         ax.set_xticks(HORIZONS_SEC)
-    plt.suptitle(f"TimesFM Zero-Shot — MAE vs Forecast Horizon\nContext={BEST_CTX_SEC}s | {n_windows} evaluation windows | Error bars = ±1 std", fontsize=12)
+    plt.suptitle(f"TimesFM Zero-Shot - MAE vs Forecast Horizon\nContext={BEST_CTX_SEC}s | {n_windows} evaluation windows | Error bars = ±1 std", fontsize=12)
     plt.tight_layout()
     st.pyplot(fig, use_container_width=True)
     plt.close()
@@ -845,7 +841,7 @@ with tab3:
     st.pyplot(fig, use_container_width=True)
     plt.close()
 
-    st.subheader(f"Actual vs Predicted — {horizon_sec}s horizon")
+    st.subheader(f"Actual vs Predicted - {horizon_sec}s horizon")
     COLORS = {"actual":"#185FA5","pred":"#D85A30"}
     if horizon_sec in store_hor:
         wins_h = store_hor[horizon_sec]
@@ -862,7 +858,7 @@ with tab3:
             ax.plot(t_h, s[key_a], color=COLORS["actual"], lw=1.2, label="Actual")
             ax.plot(t_h, s[key_p], color=COLORS["pred"],   lw=1.2, ls="--", label="Predicted")
             mae_val = mean_absolute_error(s[key_a], s[key_p])
-            ax.set_title(f"{sig_label} — horizon {horizon_sec}s | MAE = {mae_val:.3f}°")
+            ax.set_title(f"{sig_label} - horizon {horizon_sec}s | MAE = {mae_val:.3f}°")
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("deg")
             ax.legend()
@@ -927,7 +923,7 @@ with tab4:
         ax.set_xticklabels([f"{h}s" for h in HORIZONS_SEC])
         ax.set_xlabel("Forecast Horizon (s)")
         ax.set_ylabel("Abs% Error")
-        ax.set_title(f"{sig_label} — Prediction Error by Horizon")
+        ax.set_title(f"{sig_label} - Prediction Error by Horizon")
         ax.legend(fontsize=8)
     plt.suptitle("Statistical Accuracy — Peak, RMS, H1/3\nError bars = ±1 std across evaluation windows", fontsize=12)
     plt.tight_layout()
@@ -946,11 +942,11 @@ with tab4:
     with cc1:
         status = "SAFE" if roll_rms < 2.5 else "EXCEEDS LIMIT"
         color  = "green" if roll_rms < 2.5 else "red"
-        st.metric("Roll RMS", f"{roll_rms:.3f}°", delta=f"Limit 2.5° — {status}")
+        st.metric("Roll RMS", f"{roll_rms:.3f}°", delta=f"Limit 2.5° - {status}")
         st.progress(min(1.0, roll_rms / 2.5))
     with cc2:
         status2 = "SAFE" if pitch_rms < 1.5 else "EXCEEDS LIMIT"
-        st.metric("Pitch RMS", f"{pitch_rms:.3f}°", delta=f"Limit 1.5° — {status2}")
+        st.metric("Pitch RMS", f"{pitch_rms:.3f}°", delta=f"Limit 1.5° - {status2}")
         st.progress(min(1.0, pitch_rms / 1.5))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1002,8 +998,7 @@ Horizons tested     : {", ".join(str(h)+"s" for h in HORIZONS_SEC)}
 
 MAE RESULTS (degrees)
 {"Horizon":>9s}  {"Pitch MAE":>12s}  {"Pitch RMSE":>12s}  {"Roll MAE":>10s}  {"Roll RMSE":>10s}
-{"-"*58}
-"""
+{"-"*58} """
     for _, row in hor_sum.iterrows():
         report_text += (
             f"{int(row['horizon_sec']):>8d}s  "
@@ -1030,8 +1025,7 @@ KEY FINDINGS
 3. Best accuracy at short horizons (3-10s)
 4. RMS predicted within 7-14% error across all horizons
 5. Peak under-predicted at long horizons — apply safety margin for operations
-{"="*65}
-"""
+{"="*65} """
 
     st.text_area("Report", report_text, height=400)
 
