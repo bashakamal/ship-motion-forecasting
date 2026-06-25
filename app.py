@@ -523,7 +523,7 @@ with tab0:
                     if val == "rougher": return "color: red"
                     return ""
                 st.dataframe(
-                    sub.style.applymap(color_trend, subset=["Trend"]),
+                    sub.style.map(color_trend, subset=["Trend"]),
                     use_container_width=True, hide_index=True
                 )
 
@@ -588,7 +588,7 @@ with tab0:
                 if val in ("EXCEEDS","HOLD"):return "background-color:#fee2e2;color:#991b1b"
                 return ""
             st.dataframe(
-                nato_df.style.applymap(colour_nato,
+                nato_df.style.map(colour_nato,
                     subset=["Roll  (lim 2.5°)","Pitch (lim 1.5°)","Helicopter ops"]),
                 use_container_width=True, hide_index=True
             )
