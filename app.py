@@ -33,6 +33,13 @@ plt.rcParams.update({
     "font.size":         11,
 })
 
+# ── Session state init — persists results across reruns ──────────────────────
+if "results_ready" not in st.session_state:
+    st.session_state.results_ready = False
+if "pipeline_data" not in st.session_state:
+    N_WINDOWS = n_windows
+st.session_state.pipeline_data = {}
+
 # ── Helpers — copy-pasted directly from notebook ──────────────────────────────
 def remove_outliers(series, z_thresh=3.0):
     s = series.copy().astype(float)
@@ -347,9 +354,53 @@ stat_df = pd.DataFrame(all_stat_rows)
 progress.progress(100, text="Done.")
 progress.empty()
 
+# ── Store all results in session state ───────────────────────────────────────
+st.session_state.results_ready = True
+N_WINDOWS = n_windows
+st.session_state.pipeline_data = {
+    "df_raw": df_raw, "df_rs": df_rs, "df": df, "df_clean": df_clean,
+    "FS": FS, "FS_RS": FS_RS, "FS_ORIG": FS_ORIG,
+    "DT_MEAN": DT_MEAN, "DT_STD": DT_STD, "CV": CV,
+    "DUR_MIN": DUR_MIN, "ts": ts, "dt": dt,
+    "outlier_log": outlier_log,
+    "decomp_residual": decomp_residual, "decomp_corr": decomp_corr,
+    "ctx_sum": ctx_sum, "BEST_CTX_SEC": BEST_CTX_SEC, "BEST_CTX": BEST_CTX,
+    "hor_df": hor_df, "hor_sum": hor_sum, "HORIZONS_SEC": HORIZONS_SEC,
+    "store_hor": store_hor, "stat_df": stat_df,
+    "roll_raw": roll_raw, "roll_slow": roll_slow,
+    "roll_fast": roll_fast, "pitch_raw": pitch_raw,
+    "CTX_120": CTX_120, "CTX_360": CTX_360,
+    "CONTEXT_LENGTHS_SEC": CONTEXT_LENGTHS_SEC,
+    "n_windows": n_windows, "filename": uploaded.name,
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
-# RESULTS DISPLAY — 5 tabs
+# RESULTS DISPLAY — load from session state if already computed
 # ══════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.results_ready and not run_btn:
+    d = st.session_state.pipeline_data
+    df_raw   = d["df_raw"];   df_rs  = d["df_rs"];  df = d["df"]
+    df_clean = d["df_clean"]
+    FS       = d["FS"];       FS_RS  = d["FS_RS"];  FS_ORIG = d["FS_ORIG"]
+    DT_MEAN  = d["DT_MEAN"];  DT_STD = d["DT_STD"]; CV = d["CV"]
+    DUR_MIN  = d["DUR_MIN"];  ts = d["ts"];          dt = d["dt"]
+    outlier_log      = d["outlier_log"]
+    decomp_residual  = d["decomp_residual"]
+    decomp_corr      = d["decomp_corr"]
+    ctx_sum          = d["ctx_sum"]
+    BEST_CTX_SEC     = d["BEST_CTX_SEC"];  BEST_CTX = d["BEST_CTX"]
+    hor_df           = d["hor_df"];        hor_sum  = d["hor_sum"]
+    HORIZONS_SEC     = d["HORIZONS_SEC"];  store_hor = d["store_hor"]
+    stat_df          = d["stat_df"]
+    roll_raw         = d["roll_raw"];      roll_slow = d["roll_slow"]
+    roll_fast        = d["roll_fast"];     pitch_raw = d["pitch_raw"]
+    CTX_120          = d["CTX_120"];       CTX_360   = d["CTX_360"]
+    CONTEXT_LENGTHS_SEC = d["CONTEXT_LENGTHS_SEC"]
+    n_windows        = d["n_windows"]
+    N_WINDOWS        = n_windows
+    STAT_METRICS     = ["Peak", "RMS", "H1/3"]
+    model            = load_model()
 
 tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔴 Live Prediction",
@@ -617,6 +668,7 @@ with tab0:
                 "Download all predictions (CSV)",
                 data=dl_df.to_csv(index=False),
                 file_name="live_predictions.csv",
+            key="dl_live",
                 mime="text/csv",
             )
             st.caption(
@@ -1039,6 +1091,7 @@ KEY FINDINGS
             "Download cleaned CSV",
             data=df_clean.to_csv(index=False),
             file_name="imu_cleaned_resampled.csv",
+            key="dl_cleaned",
             mime="text/csv",
         )
     with c2:
@@ -1046,6 +1099,7 @@ KEY FINDINGS
             "Download horizon results",
             data=hor_df.to_csv(index=False),
             file_name="results_horizon_study.csv",
+            key="dl_horizon",
             mime="text/csv",
         )
     with c3:
@@ -1053,6 +1107,7 @@ KEY FINDINGS
             "Download stat results",
             data=stat_df.to_csv(index=False),
             file_name="results_stats_all.csv",
+            key="dl_stats",
             mime="text/csv",
         )
     with c4:
@@ -1060,5 +1115,6 @@ KEY FINDINGS
             "Download report (.txt)",
             data=report_text,
             file_name="ship_motion_report.txt",
+            key="dl_report",
             mime="text/plain",
         )
