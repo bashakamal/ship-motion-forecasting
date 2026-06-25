@@ -352,13 +352,282 @@ progress.empty()
 # RESULTS DISPLAY — 5 tabs
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🔴 Live Prediction",
     "📊 Data Quality",
     "🔧 Preprocessing",
-    "📈 Forecast",
-    "📐 Statistics",
+    "📈 Forecast (Evaluation)",
+    "📐 Statistics (Evaluation)",
     "📋 Report",
 ])
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 0 — LIVE PREDICTION
+# ─────────────────────────────────────────────────────────────────────────────
+with tab0:
+    st.subheader("Live Prediction")
+    st.caption(
+        "Uses the most recent data in your file as context and predicts forward into the future. "
+        "No ground truth is available — this is the actual forward forecast."
+    )
+
+    lp_col1, lp_col2 = st.columns(2)
+    with lp_col1:
+        st.markdown("**Context window — how much history to use**")
+        lp_ctx_sec = st.select_slider(
+            "Context length (s)",
+            options=[60, 120, 180, 240, 360],
+            value=120,
+            format_func=lambda x: f"{x}s  ({x//60} min of past data)",
+            key="lp_ctx",
+        )
+    with lp_col2:
+        st.markdown("**Prediction horizons — select how far ahead to predict**")
+        lp_horizons = st.multiselect(
+            "Horizons (can select multiple)",
+            options=[3, 5, 10, 15, 20, 30, 60, 90, 120],
+            default=[3, 10, 20, 30],
+            format_func=lambda x: f"{x}s",
+            key="lp_horizons",
+        )
+
+    if not lp_horizons:
+        st.warning("Select at least one horizon above.")
+    else:
+        lp_horizons_sorted = sorted(lp_horizons)
+        lp_ctx     = int(lp_ctx_sec * FS)
+        lp_cut     = len(df_clean)
+
+        if lp_cut < lp_ctx + 10:
+            st.error(f"Not enough data for {lp_ctx_sec}s context. Upload a longer recording.")
+        else:
+            ctx_pitch_live = pitch_raw[lp_cut - lp_ctx : lp_cut]
+            ctx_roll_live  = roll_raw [lp_cut - lp_ctx : lp_cut]
+            t_ctx = np.arange(len(ctx_pitch_live)) / FS
+
+            lp_results = {}
+            lp_bar = st.progress(0, text="Running live predictions...")
+            for ki, h_sec in enumerate(lp_horizons_sorted):
+                h_samps = int(h_sec * FS)
+                _, p_p  = tfm_predict(model, pitch_raw, lp_cut, lp_ctx, h_samps)
+                _, p_rf = tfm_predict(model, roll_fast, lp_cut, lp_ctx, h_samps)
+                ctx_360 = min(CTX_360, lp_cut)
+                _, p_rs = tfm_predict(model, roll_slow, lp_cut, ctx_360, h_samps)
+                p_roll  = p_rf + p_rs
+                t_pred  = lp_ctx_sec + np.arange(h_samps) / FS
+                lp_results[h_sec] = {"p_pitch": p_p, "p_roll": p_roll,
+                                     "t_pred": t_pred, "h_samps": h_samps}
+                lp_bar.progress((ki+1)/len(lp_horizons_sorted),
+                                text=f"Predicted {h_sec}s horizon...")
+            lp_bar.empty()
+
+            HORIZON_COLORS = ["#185FA5","#D85A30","#3B6D11","#534AB7",
+                               "#BA7517","#0D7A7A","#993C1D","#444444","#5C1F8A"]
+
+            # ── A: Time series ─────────────────────────────────────────────
+            st.divider()
+            st.markdown("### A — Time Series Prediction")
+            st.caption(
+                "Gray = recorded context (actual past). "
+                "Coloured dashed = predicted future (each colour = one horizon). "
+                "Black dashed line = NOW."
+            )
+
+            for sig_label, ctx_sig, pred_key in [
+                ("Pitch", ctx_pitch_live, "p_pitch"),
+                ("Roll",  ctx_roll_live,  "p_roll"),
+            ]:
+                fig, ax = plt.subplots(figsize=(15, 4))
+                ax.plot(t_ctx, ctx_sig, color="gray", lw=1.0,
+                        label=f"Recorded (last {lp_ctx_sec}s)", zorder=3)
+                ax.axvline(lp_ctx_sec, color="black", lw=1.5, ls="--", zorder=4,
+                           label="NOW")
+                ax.fill_between(t_ctx, ctx_sig.min(), ctx_sig.max(),
+                                alpha=0.04, color="gray")
+                max_h = max(lp_horizons_sorted)
+                ax.axvspan(lp_ctx_sec, lp_ctx_sec + max_h, alpha=0.04, color="#185FA5")
+
+                for i, h_sec in enumerate(lp_horizons_sorted):
+                    r = lp_results[h_sec]
+                    ax.plot(r["t_pred"], r[pred_key],
+                            color=HORIZON_COLORS[i % len(HORIZON_COLORS)],
+                            lw=1.8, ls="--", label=f"Predict next {h_sec}s", zorder=5)
+
+                ax.set_xlabel("Time (s)  [0 = start of context window]")
+                ax.set_ylabel(f"{sig_label} (deg)")
+                ax.set_title(
+                    f"{sig_label} — Actual context + Forward prediction
+"
+                    f"Context = last {lp_ctx_sec}s of uploaded data"
+                )
+                ax.legend(fontsize=8, loc="upper left",
+                          ncol=min(4, len(lp_horizons_sorted)+1))
+                plt.tight_layout()
+                st.pyplot(fig, use_container_width=True)
+                plt.close()
+
+            # ── B: Statistical table ───────────────────────────────────────
+            st.divider()
+            st.markdown("### B — Statistical Prediction (Peak / RMS / H1/3)")
+            st.caption(
+                "Input = stats of the last [horizon] seconds of recorded data — the sea state that just happened. "
+                "Predicted = stats of the next [horizon] seconds — what the model forecasts. "
+                "Trend = whether sea is expected to get calmer, rougher, or stay stable."
+            )
+
+            stat_rows_live = []
+            for sig_label, ctx_sig, pred_key in [
+                ("Pitch", ctx_pitch_live, "p_pitch"),
+                ("Roll",  ctx_roll_live,  "p_roll"),
+            ]:
+                for h_sec in lp_horizons_sorted:
+                    r       = lp_results[h_sec]
+                    pred_w  = r[pred_key]
+                    h_samps = r["h_samps"]
+                    inp_w   = ctx_sig[-h_samps:] if h_samps <= len(ctx_sig) else ctx_sig
+
+                    for metric in ["Peak", "RMS", "H1/3"]:
+                        inp_val  = stat_fn(inp_w,  metric)
+                        pred_val = stat_fn(pred_w, metric)
+                        hor_match = hor_sum[hor_sum["horizon_sec"] == h_sec]
+                        if len(hor_match) > 0:
+                            ec = "pitch_mean" if sig_label=="Pitch" else "roll_mean"
+                            emae = float(hor_match[ec].values[0])
+                            acc  = f"±{emae:.2f}°"
+                        else:
+                            nearest = hor_sum.iloc[
+                                (hor_sum["horizon_sec"]-h_sec).abs().argmin()]
+                            ec   = "pitch_mean" if sig_label=="Pitch" else "roll_mean"
+                            emae = float(nearest[ec])
+                            acc  = f"±{emae:.2f}° (approx)"
+
+                        pct_chg = (pred_val - inp_val) / (inp_val + 1e-9) * 100
+                        trend   = ("calming" if pct_chg < -3
+                                   else "rougher" if pct_chg > 3 else "stable")
+
+                        stat_rows_live.append({
+                            "Signal":   sig_label,
+                            "Horizon":  f"{h_sec}s",
+                            "Metric":   metric,
+                            "Input (past Ns)":     round(inp_val,  3),
+                            "Predicted (next Ns)": round(pred_val, 3),
+                            "Change (%)":          round(pct_chg,  1),
+                            "Trend":               trend,
+                            "Model accuracy":      acc,
+                        })
+
+            stat_live_df = pd.DataFrame(stat_rows_live)
+
+            for sig in ["Pitch", "Roll"]:
+                st.markdown(f"**{sig} motion**")
+                sub = stat_live_df[stat_live_df["Signal"]==sig].drop(columns=["Signal"])
+                def color_trend(val):
+                    if val == "calming": return "color: green"
+                    if val == "rougher": return "color: red"
+                    return ""
+                st.dataframe(
+                    sub.style.applymap(color_trend, subset=["Trend"]),
+                    use_container_width=True, hide_index=True
+                )
+
+            # ── C: Bar chart ───────────────────────────────────────────────
+            st.divider()
+            st.markdown("### C — Predicted Statistics by Horizon")
+            st.caption("How the predicted Peak, RMS, H1/3 change as horizon increases.")
+            fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+            colors_met = {"Peak":"#D85A30","RMS":"#185FA5","H1/3":"#3B6D11"}
+            for ax, sig_label in zip(axes, ["Pitch","Roll"]):
+                sub = stat_live_df[stat_live_df["Signal"]==sig_label]
+                x   = np.arange(len(lp_horizons_sorted))
+                w   = 0.25
+                for j, metric in enumerate(["Peak","RMS","H1/3"]):
+                    m    = sub[sub["Metric"]==metric]
+                    vals = []
+                    for h in lp_horizons_sorted:
+                        row = m[m["Horizon"]==f"{h}s"]
+                        vals.append(float(row["Predicted (next Ns)"].values[0])
+                                    if len(row) > 0 else 0)
+                    ax.bar(x + j*w, vals, w, label=metric,
+                           color=colors_met[metric], alpha=0.85)
+                ax.set_xticks(x + w)
+                ax.set_xticklabels([f"{h}s" for h in lp_horizons_sorted])
+                ax.set_xlabel("Forecast Horizon")
+                ax.set_ylabel("Predicted amplitude (deg)")
+                ax.set_title(f"{sig_label} — Predicted Stats by Horizon")
+                ax.legend(fontsize=9)
+            plt.suptitle(
+                "Live Prediction — Statistical Summary
+"
+                "All values are predictions (no ground truth available)",
+                fontsize=12)
+            plt.tight_layout()
+            st.pyplot(fig, use_container_width=True)
+            plt.close()
+
+            # ── D: NATO check ──────────────────────────────────────────────
+            st.divider()
+            st.markdown("### D — NATO STANAG 4154 Check on Predicted Motion")
+            st.caption(
+                "Roll RMS limit = 2.5°  ·  Pitch RMS limit = 1.5°  ·  "
+                "Based on predicted motion for each horizon."
+            )
+            nato_rows = []
+            for h_sec in lp_horizons_sorted:
+                r          = lp_results[h_sec]
+                pred_r_rms = compute_rms(r["p_roll"])
+                pred_p_rms = compute_rms(r["p_pitch"])
+                roll_ok    = pred_r_rms < 2.5
+                pitch_ok   = pred_p_rms < 1.5
+                nato_rows.append({
+                    "Horizon":           f"{h_sec}s",
+                    "Pred Roll RMS (°)": round(pred_r_rms, 3),
+                    "Roll  (lim 2.5°)":  "SAFE"    if roll_ok  else "EXCEEDS",
+                    "Pred Pitch RMS (°)":round(pred_p_rms, 3),
+                    "Pitch (lim 1.5°)":  "SAFE"    if pitch_ok else "EXCEEDS",
+                    "Helicopter ops":    "GO"       if (roll_ok and pitch_ok) else "HOLD",
+                })
+            nato_df = pd.DataFrame(nato_rows)
+            def colour_nato(val):
+                if val in ("SAFE","GO"):     return "background-color:#d1fae5;color:#065f46"
+                if val in ("EXCEEDS","HOLD"):return "background-color:#fee2e2;color:#991b1b"
+                return ""
+            st.dataframe(
+                nato_df.style.applymap(colour_nato,
+                    subset=["Roll  (lim 2.5°)","Pitch (lim 1.5°)","Helicopter ops"]),
+                use_container_width=True, hide_index=True
+            )
+            st.info(
+                "GO = predicted sea state within NATO limits. "
+                "HOLD = model predicts conditions will exceed safety threshold at this horizon."
+            )
+
+            # ── E: Download ────────────────────────────────────────────────
+            st.divider()
+            st.markdown("### Download Predictions")
+            dl_rows = []
+            for h_sec in lp_horizons_sorted:
+                r = lp_results[h_sec]
+                for i, (tp, pp, pr) in enumerate(
+                    zip(r["t_pred"], r["p_pitch"], r["p_roll"])
+                ):
+                    dl_rows.append({
+                        "horizon_sec":     h_sec,
+                        "time_from_now_s": round(tp - lp_ctx_sec, 3),
+                        "pred_pitch_deg":  round(float(pp), 4),
+                        "pred_roll_deg":   round(float(pr), 4),
+                    })
+            dl_df = pd.DataFrame(dl_rows)
+            st.download_button(
+                "Download all predictions (CSV)",
+                data=dl_df.to_csv(index=False),
+                file_name="live_predictions.csv",
+                mime="text/csv",
+            )
+            st.caption(
+                "Columns: horizon_sec = which horizon · "
+                "time_from_now_s = seconds after last data point · "
+                "pred_pitch_deg / pred_roll_deg = predicted angle."
+            )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — Data Quality
