@@ -37,8 +37,7 @@ plt.rcParams.update({
 if "results_ready" not in st.session_state:
     st.session_state.results_ready = False
 if "pipeline_data" not in st.session_state:
-    N_WINDOWS = n_windows
-st.session_state.pipeline_data = {}
+    st.session_state.pipeline_data = {}
 
 # ── Helpers — copy-pasted directly from notebook ──────────────────────────────
 def remove_outliers(series, z_thresh=3.0):
