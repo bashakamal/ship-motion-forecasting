@@ -126,10 +126,12 @@ with st.sidebar:
     )
 
 # ── Main area ─────────────────────────────────────────────────────────────────
-if uploaded is None:
-    st.markdown("## Welcome")
-    st.info("Upload an IMU CSV file in the sidebar and click **Run pipeline** to begin.")
-    st.markdown("""
+# If results already computed in this session, skip welcome and pipeline
+if not st.session_state.results_ready:
+    if uploaded is None:
+        st.markdown("## Welcome")
+        st.info("Upload an IMU CSV file in the sidebar and click **Run pipeline** to begin.")
+        st.markdown("""
 **What this app does:**
 
 1. Checks timestamp uniformity and resamples to exact 20 Hz
@@ -145,263 +147,269 @@ timestamp,roll_deg,pitch_deg,yaw_deg,gz,...
 1764676000.00,-5.845,-3.808,176.87,...
 1764676000.05,-5.539,-4.089,176.74,...
 ```
-    """)
-    st.stop()
+        """)
+        st.stop()
 
-if not run_btn:
-    st.info("File uploaded. Adjust settings in the sidebar then click **Run pipeline**.")
-    st.stop()
+    if not run_btn:
+        st.info("File uploaded. Adjust settings in the sidebar then click **Run pipeline**.")
+        st.stop()
 
+
+# ── If results already in session_state, restore and jump to tabs ─────────────
+if st.session_state.results_ready:
+    d = st.session_state.pipeline_data
+    df_raw          = d["df_raw"];   df_rs  = d["df_rs"];  df = d["df"]
+    df_clean        = d["df_clean"]
+    FS              = d["FS"];       FS_RS  = d["FS_RS"];  FS_ORIG = d["FS_ORIG"]
+    DT_MEAN         = d["DT_MEAN"];  DT_STD = d["DT_STD"]; CV = d["CV"]
+    DUR_MIN         = d["DUR_MIN"];  ts     = d["ts"];      dt = d["dt"]
+    FS_RAW          = d.get("FS_RAW", 1.0/DT_MEAN)
+    outlier_log     = d["outlier_log"]
+    decomp_residual = d["decomp_residual"]
+    decomp_corr     = d["decomp_corr"]
+    ctx_sum         = d["ctx_sum"]
+    BEST_CTX_SEC    = d["BEST_CTX_SEC"];  BEST_CTX = d["BEST_CTX"]
+    hor_df          = d["hor_df"];        hor_sum  = d["hor_sum"]
+    HORIZONS_SEC    = d["HORIZONS_SEC"];  store_hor = d["store_hor"]
+    stat_df         = d["stat_df"]
+    roll_raw        = d["roll_raw"];      roll_slow = d["roll_slow"]
+    roll_fast       = d["roll_fast"];     pitch_raw = d["pitch_raw"]
+    CTX_120         = d["CTX_120"];       CTX_360   = d["CTX_360"]
+    CONTEXT_LENGTHS_SEC = d["CONTEXT_LENGTHS_SEC"]
+    n_windows       = d["n_windows"]
+    N_WINDOWS       = n_windows
+    STAT_METRICS    = d.get("STAT_METRICS", ["Peak", "RMS", "H1/3"])
+    model           = load_model()
+else:
+    pass  # fall through to pipeline below
+
+if not st.session_state.results_ready:
 # ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE EXECUTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-progress = st.progress(0, text="Loading data...")
+    progress = st.progress(0, text="Loading data...")
 
-# ── Load CSV ──────────────────────────────────────────────────────────────────
-df_raw = pd.read_csv(uploaded)
-df_raw.columns = df_raw.columns.str.strip().str.lower()
+    # ── Load CSV ──────────────────────────────────────────────────────────────────
+    df_raw = pd.read_csv(uploaded)
+    df_raw.columns = df_raw.columns.str.strip().str.lower()
 
-# Detect timestamp column
-ts_col = next((c for c in ["timestamp", "time_sec", "time"] if c in df_raw.columns), None)
-if ts_col is None:
-    st.error("No timestamp column found. Need `timestamp`, `time_sec`, or `time`.")
-    st.stop()
-for col in ["roll_deg", "pitch_deg"]:
-    if col not in df_raw.columns:
-        st.error(f"Missing required column: `{col}`")
+    # Detect timestamp column
+    ts_col = next((c for c in ["timestamp", "time_sec", "time"] if c in df_raw.columns), None)
+    if ts_col is None:
+        st.error("No timestamp column found. Need `timestamp`, `time_sec`, or `time`.")
         st.stop()
+    for col in ["roll_deg", "pitch_deg"]:
+        if col not in df_raw.columns:
+            st.error(f"Missing required column: `{col}`")
+            st.stop()
 
-df_raw["time_sec"] = df_raw[ts_col] - df_raw[ts_col].iloc[0]
-FS_RAW   = len(df_raw) / df_raw["time_sec"].iloc[-1]
-DUR_MIN  = df_raw["time_sec"].iloc[-1] / 60
+    df_raw["time_sec"] = df_raw[ts_col] - df_raw[ts_col].iloc[0]
+    FS_RAW   = len(df_raw) / df_raw["time_sec"].iloc[-1]
+    DUR_MIN  = df_raw["time_sec"].iloc[-1] / 60
 
-progress.progress(5, text="Checking timestamps...")
+    progress.progress(5, text="Checking timestamps...")
 
-# ── Step 1: Timestamp quality ─────────────────────────────────────────────────
-ts  = df_raw[ts_col].values.astype(np.float64)
-dt  = np.diff(ts)
-n   = len(dt)
-DT_MEAN = dt.mean()
-DT_STD  = dt.std()
-CV      = DT_STD / DT_MEAN
-FS_ORIG = 1.0 / DT_MEAN   # estimated original sampling rate
+    # ── Step 1: Timestamp quality ─────────────────────────────────────────────────
+    ts  = df_raw[ts_col].values.astype(np.float64)
+    dt  = np.diff(ts)
+    n   = len(dt)
+    DT_MEAN = dt.mean()
+    DT_STD  = dt.std()
+    CV      = DT_STD / DT_MEAN
+    FS_ORIG = 1.0 / DT_MEAN   # estimated original sampling rate
 
-progress.progress(10, text="Resampling to 20 Hz...")
+    progress.progress(10, text="Resampling to 20 Hz...")
 
-# ── Step 2: Resample to 20 Hz ─────────────────────────────────────────────────
-TARGET_HZ = 20.0
-IMU_CHANNELS = ["roll_deg", "pitch_deg", "yaw_deg", "ax", "ay", "az", "gx", "gy", "gz"]
+    # ── Step 2: Resample to 20 Hz ─────────────────────────────────────────────────
+    TARGET_HZ = 20.0
+    IMU_CHANNELS = ["roll_deg", "pitch_deg", "yaw_deg", "ax", "ay", "az", "gx", "gy", "gz"]
 
-t0, t1   = ts[0], ts[-1]
-t_uniform = np.arange(t0, t1, 1.0 / TARGET_HZ)
+    t0, t1   = ts[0], ts[-1]
+    t_uniform = np.arange(t0, t1, 1.0 / TARGET_HZ)
 
-df_rs = pd.DataFrame({"timestamp": t_uniform, "time_sec": t_uniform - t0})
-for col in IMU_CHANNELS:
-    if col in df_raw.columns:
-        df_rs[col] = np.interp(t_uniform, ts, df_raw[col].values.astype(float))
+    df_rs = pd.DataFrame({"timestamp": t_uniform, "time_sec": t_uniform - t0})
+    for col in IMU_CHANNELS:
+        if col in df_raw.columns:
+            df_rs[col] = np.interp(t_uniform, ts, df_raw[col].values.astype(float))
 
-FS    = TARGET_HZ
-FS_RS = TARGET_HZ
+    FS    = TARGET_HZ
+    FS_RS = TARGET_HZ
 
-progress.progress(20, text="Removing outliers and filtering...")
+    progress.progress(20, text="Removing outliers and filtering...")
 
-# ── Step 3: Outlier removal ───────────────────────────────────────────────────
-df = df_rs.copy()
-if "yaw_deg" in df.columns:
-    df["yaw_unwrap"] = np.unwrap(df["yaw_deg"].values, period=360)
+    # ── Step 3: Outlier removal ───────────────────────────────────────────────────
+    df = df_rs.copy()
+    if "yaw_deg" in df.columns:
+        df["yaw_unwrap"] = np.unwrap(df["yaw_deg"].values, period=360)
 
-outlier_log = {}
-for col in ["roll_deg", "pitch_deg", "gz"]:
-    if col in df.columns:
-        df[col], n_out = remove_outliers(df[col])
-        outlier_log[col] = n_out
+    outlier_log = {}
+    for col in ["roll_deg", "pitch_deg", "gz"]:
+        if col in df.columns:
+            df[col], n_out = remove_outliers(df[col])
+            outlier_log[col] = n_out
 
-# ── Step 4: Butterworth filter + roll decomposition ──────────────────────────
-df["pitch_filt"] = butter_lp(df["pitch_deg"].values, cutoff=2.0, fs=FS)
-df["roll_slow"]  = butter_lp(df["roll_deg"].values,  cutoff=0.05, fs=FS)
-df["roll_fast"]  = butter_bp(df["roll_deg"].values,  low=0.05, high=2.0, fs=FS)
-df["roll_filt"]  = butter_lp(df["roll_deg"].values,  cutoff=2.0, fs=FS)
+    # ── Step 4: Butterworth filter + roll decomposition ──────────────────────────
+    df["pitch_filt"] = butter_lp(df["pitch_deg"].values, cutoff=2.0, fs=FS)
+    df["roll_slow"]  = butter_lp(df["roll_deg"].values,  cutoff=0.05, fs=FS)
+    df["roll_fast"]  = butter_bp(df["roll_deg"].values,  low=0.05, high=2.0, fs=FS)
+    df["roll_filt"]  = butter_lp(df["roll_deg"].values,  cutoff=2.0, fs=FS)
 
-decomp_residual = float(np.abs(df["roll_deg"].values - (df["roll_slow"] + df["roll_fast"])).mean())
-decomp_corr     = float(np.corrcoef(df["roll_filt"].values, df["roll_slow"] + df["roll_fast"])[0, 1])
+    decomp_residual = float(np.abs(df["roll_deg"].values - (df["roll_slow"] + df["roll_fast"])).mean())
+    decomp_corr     = float(np.corrcoef(df["roll_filt"].values, df["roll_slow"] + df["roll_fast"])[0, 1])
 
-CLEAN_COLS = ["time_sec","roll_filt","roll_slow","roll_fast","pitch_filt"] + \
-             [c for c in ["gz","gx","gy","ax","ay","az"] if c in df.columns]
-df_clean = df[CLEAN_COLS].copy()
-df_clean.columns = ["time_sec","roll_deg","roll_slow","roll_fast","pitch_deg"] + \
-                   [c for c in ["gz","gx","gy","ax","ay","az"] if c in df.columns]
+    CLEAN_COLS = ["time_sec","roll_filt","roll_slow","roll_fast","pitch_filt"] + \
+                 [c for c in ["gz","gx","gy","ax","ay","az"] if c in df.columns]
+    df_clean = df[CLEAN_COLS].copy()
+    df_clean.columns = ["time_sec","roll_deg","roll_slow","roll_fast","pitch_deg"] + \
+                       [c for c in ["gz","gx","gy","ax","ay","az"] if c in df.columns]
 
-progress.progress(30, text="Loading TimesFM model...")
+    progress.progress(30, text="Loading TimesFM model...")
 
-# ── Step 5: Load TimesFM ──────────────────────────────────────────────────────
-from timesfm import ForecastConfig
-model  = load_model()
-CTX_120 = int(120 * FS)
-CTX_360 = int(360 * FS)
+    # ── Step 5: Load TimesFM ──────────────────────────────────────────────────────
+    from timesfm import ForecastConfig
+    model  = load_model()
+    CTX_120 = int(120 * FS)
+    CTX_360 = int(360 * FS)
 
-roll_raw  = df_clean["roll_deg"].values.astype(np.float32)
-roll_slow = df_clean["roll_slow"].values.astype(np.float32)
-roll_fast = df_clean["roll_fast"].values.astype(np.float32)
-pitch_raw = df_clean["pitch_deg"].values.astype(np.float32)
+    roll_raw  = df_clean["roll_deg"].values.astype(np.float32)
+    roll_slow = df_clean["roll_slow"].values.astype(np.float32)
+    roll_fast = df_clean["roll_fast"].values.astype(np.float32)
+    pitch_raw = df_clean["pitch_deg"].values.astype(np.float32)
 
-MAX_CTX = CTX_360
-MAX_HOR = int(max(120, horizon_sec) * FS)
+    MAX_CTX = CTX_360
+    MAX_HOR = int(max(120, horizon_sec) * FS)
 
-cut_points = np.linspace(
-    MAX_CTX + MAX_HOR,
-    len(df_clean) - MAX_HOR,
-    n_windows, dtype=int
-)
+    cut_points = np.linspace(
+        MAX_CTX + MAX_HOR,
+        len(df_clean) - MAX_HOR,
+        n_windows, dtype=int
+    )
 
-progress.progress(35, text="Running context window study...")
+    progress.progress(35, text="Running context window study...")
 
-# ── Step 6: Context window study ──────────────────────────────────────────────
-CONTEXT_LENGTHS_SEC = [60, 120, 180, 240, 360]
-HORIZON_5A          = int(120 * FS)
-ctx_results         = []
+    # ── Step 6: Context window study ──────────────────────────────────────────────
+    CONTEXT_LENGTHS_SEC = [60, 120, 180, 240, 360]
+    HORIZON_5A          = int(120 * FS)
+    ctx_results         = []
 
-for ctx_s in CONTEXT_LENGTHS_SEC:
-    ctx_len = int(ctx_s * FS)
-    for i, cut in enumerate(cut_points):
-        a_p,  p_p  = tfm_predict(model, pitch_raw, cut, ctx_len, HORIZON_5A)
-        a_rf, p_rf = tfm_predict(model, roll_fast,  cut, ctx_len, HORIZON_5A)
-        a_rs, p_rs = tfm_predict(model, roll_slow,  cut, CTX_360, HORIZON_5A)
-        a_roll = roll_raw[cut : cut + HORIZON_5A]
-        p_roll = p_rf + p_rs
-        ctx_results.append({
-            "ctx_sec": ctx_s, "window": i + 1,
-            "mae_pitch": mean_absolute_error(a_p, p_p),
-            "mae_roll":  mean_absolute_error(a_roll, p_roll),
-        })
-
-ctx_df  = pd.DataFrame(ctx_results)
-ctx_sum = ctx_df.groupby("ctx_sec").agg(
-    pitch_mean=("mae_pitch","mean"), pitch_std=("mae_pitch","std"),
-    roll_mean =("mae_roll", "mean"), roll_std =("mae_roll", "std"),
-).reset_index()
-
-BEST_CTX_SEC = int(ctx_sum.iloc[
-    (ctx_sum["pitch_mean"] + ctx_sum["roll_mean"]).argmin()
-]["ctx_sec"])
-BEST_CTX = int(BEST_CTX_SEC * FS)
-
-progress.progress(55, text=f"Running horizon study (ctx={BEST_CTX_SEC}s)...")
-
-# ── Step 7: Horizon study ─────────────────────────────────────────────────────
-HORIZONS_SEC = [3, 10, 20, 30, 60, 120]
-H_USER       = horizon_sec
-hor_results  = []
-store_hor    = {h: [] for h in HORIZONS_SEC}
-
-for h_sec in HORIZONS_SEC:
-    h_samps = int(h_sec * FS)
-    for i, cut in enumerate(cut_points):
-        a_p,  p_p  = tfm_predict(model, pitch_raw, cut, BEST_CTX, h_samps)
-        ctx_p      = pitch_raw[cut - h_samps : cut].astype(np.float32)
-        a_rf, p_rf = tfm_predict(model, roll_fast, cut, BEST_CTX, h_samps)
-        a_rs, p_rs = tfm_predict(model, roll_slow, cut, CTX_360,  h_samps)
-        a_roll     = roll_raw[cut : cut + h_samps]
-        p_roll     = p_rf + p_rs
-        ctx_roll   = roll_raw[cut - h_samps : cut].astype(np.float32)
-        hor_results.append({
-            "horizon_sec": h_sec, "window": i + 1,
-            "mae_pitch":  mean_absolute_error(a_p, p_p),
-            "mae_roll":   mean_absolute_error(a_roll, p_roll),
-            "rmse_pitch": float(np.sqrt(mean_squared_error(a_p, p_p))),
-            "rmse_roll":  float(np.sqrt(mean_squared_error(a_roll, p_roll))),
-        })
-        store_hor[h_sec].append(dict(
-            a_pitch=a_p,  p_pitch=p_p,  ctx_pitch=ctx_p,
-            a_roll=a_roll, p_roll=p_roll, ctx_roll=ctx_roll,
-        ))
-
-hor_df  = pd.DataFrame(hor_results)
-hor_sum = hor_df.groupby("horizon_sec").agg(
-    pitch_mean=("mae_pitch","mean"), pitch_std=("mae_pitch","std"),
-    roll_mean =("mae_roll", "mean"), roll_std =("mae_roll", "std"),
-    pitch_rmse=("rmse_pitch","mean"), roll_rmse=("rmse_roll","mean"),
-).reset_index()
-
-progress.progress(85, text="Computing statistical metrics...")
-
-# ── Step 8: Statistical metrics ───────────────────────────────────────────────
-STAT_METRICS = ["Peak", "RMS", "H1/3"]
-all_stat_rows = []
-
-for sig_label, key_ctx, key_a, key_p in [
-    ("Pitch","ctx_pitch","a_pitch","p_pitch"),
-    ("Roll", "ctx_roll", "a_roll", "p_roll"),
-]:
-    for h_sec in HORIZONS_SEC:
-        wins = store_hor[h_sec]
-        for metric in STAT_METRICS:
-            inp_v  = [stat_fn(w[key_ctx], metric) for w in wins]
-            tru_v  = [stat_fn(w[key_a],   metric) for w in wins]
-            prd_v  = [stat_fn(w[key_p],   metric) for w in wins]
-            abspct = [abs(p-t)/(t+1e-9)*100 for p,t in zip(prd_v, tru_v)]
-            all_stat_rows.append({
-                "Signal": sig_label, "Horizon_sec": h_sec, "Metric": metric,
-                "Input_mean":  round(np.mean(inp_v), 4),
-                "Pred_mean":   round(np.mean(prd_v), 4),
-                "True_mean":   round(np.mean(tru_v), 4),
-                "AbsErr_pct":  round(np.mean(abspct), 2),
-                "Std_pct":     round(np.std(abspct),  2),
+    for ctx_s in CONTEXT_LENGTHS_SEC:
+        ctx_len = int(ctx_s * FS)
+        for i, cut in enumerate(cut_points):
+            a_p,  p_p  = tfm_predict(model, pitch_raw, cut, ctx_len, HORIZON_5A)
+            a_rf, p_rf = tfm_predict(model, roll_fast,  cut, ctx_len, HORIZON_5A)
+            a_rs, p_rs = tfm_predict(model, roll_slow,  cut, CTX_360, HORIZON_5A)
+            a_roll = roll_raw[cut : cut + HORIZON_5A]
+            p_roll = p_rf + p_rs
+            ctx_results.append({
+                "ctx_sec": ctx_s, "window": i + 1,
+                "mae_pitch": mean_absolute_error(a_p, p_p),
+                "mae_roll":  mean_absolute_error(a_roll, p_roll),
             })
 
-stat_df = pd.DataFrame(all_stat_rows)
+    ctx_df  = pd.DataFrame(ctx_results)
+    ctx_sum = ctx_df.groupby("ctx_sec").agg(
+        pitch_mean=("mae_pitch","mean"), pitch_std=("mae_pitch","std"),
+        roll_mean =("mae_roll", "mean"), roll_std =("mae_roll", "std"),
+    ).reset_index()
 
-progress.progress(100, text="Done.")
-progress.empty()
+    BEST_CTX_SEC = int(ctx_sum.iloc[
+        (ctx_sum["pitch_mean"] + ctx_sum["roll_mean"]).argmin()
+    ]["ctx_sec"])
+    BEST_CTX = int(BEST_CTX_SEC * FS)
 
-# ── Store all results in session state ───────────────────────────────────────
-st.session_state.results_ready = True
-N_WINDOWS = n_windows
-st.session_state.pipeline_data = {
-    "df_raw": df_raw, "df_rs": df_rs, "df": df, "df_clean": df_clean,
-    "FS": FS, "FS_RS": FS_RS, "FS_ORIG": FS_ORIG,
-    "DT_MEAN": DT_MEAN, "DT_STD": DT_STD, "CV": CV,
-    "DUR_MIN": DUR_MIN, "ts": ts, "dt": dt,
-    "outlier_log": outlier_log,
-    "decomp_residual": decomp_residual, "decomp_corr": decomp_corr,
-    "ctx_sum": ctx_sum, "BEST_CTX_SEC": BEST_CTX_SEC, "BEST_CTX": BEST_CTX,
-    "hor_df": hor_df, "hor_sum": hor_sum, "HORIZONS_SEC": HORIZONS_SEC,
-    "store_hor": store_hor, "stat_df": stat_df,
-    "roll_raw": roll_raw, "roll_slow": roll_slow,
-    "roll_fast": roll_fast, "pitch_raw": pitch_raw,
-    "CTX_120": CTX_120, "CTX_360": CTX_360,
-    "CONTEXT_LENGTHS_SEC": CONTEXT_LENGTHS_SEC,
-    "n_windows": n_windows, "filename": uploaded.name,
-    "STAT_METRICS": ["Peak", "RMS", "H1/3"],
-}
+    progress.progress(55, text=f"Running horizon study (ctx={BEST_CTX_SEC}s)...")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# RESULTS DISPLAY — load from session state if already computed
-# ══════════════════════════════════════════════════════════════════════════════
+    # ── Step 7: Horizon study ─────────────────────────────────────────────────────
+    HORIZONS_SEC = [3, 10, 20, 30, 60, 120]
+    H_USER       = horizon_sec
+    hor_results  = []
+    store_hor    = {h: [] for h in HORIZONS_SEC}
 
-if st.session_state.results_ready and not run_btn:
-    d = st.session_state.pipeline_data
-    df_raw   = d["df_raw"];   df_rs  = d["df_rs"];  df = d["df"]
-    df_clean = d["df_clean"]
-    FS       = d["FS"];       FS_RS  = d["FS_RS"];  FS_ORIG = d["FS_ORIG"]
-    DT_MEAN  = d["DT_MEAN"];  DT_STD = d["DT_STD"]; CV = d["CV"]
-    DUR_MIN  = d["DUR_MIN"];  ts = d["ts"];          dt = d["dt"]
-    outlier_log      = d["outlier_log"]
-    decomp_residual  = d["decomp_residual"]
-    decomp_corr      = d["decomp_corr"]
-    ctx_sum          = d["ctx_sum"]
-    BEST_CTX_SEC     = d["BEST_CTX_SEC"];  BEST_CTX = d["BEST_CTX"]
-    hor_df           = d["hor_df"];        hor_sum  = d["hor_sum"]
-    HORIZONS_SEC     = d["HORIZONS_SEC"];  store_hor = d["store_hor"]
-    stat_df          = d["stat_df"]
-    roll_raw         = d["roll_raw"];      roll_slow = d["roll_slow"]
-    roll_fast        = d["roll_fast"];     pitch_raw = d["pitch_raw"]
-    CTX_120          = d["CTX_120"];       CTX_360   = d["CTX_360"]
-    CONTEXT_LENGTHS_SEC = d["CONTEXT_LENGTHS_SEC"]
-    n_windows        = d["n_windows"]
-    N_WINDOWS        = n_windows
-    STAT_METRICS     = d.get("STAT_METRICS", ["Peak", "RMS", "H1/3"])
-    model            = load_model()
+    for h_sec in HORIZONS_SEC:
+        h_samps = int(h_sec * FS)
+        for i, cut in enumerate(cut_points):
+            a_p,  p_p  = tfm_predict(model, pitch_raw, cut, BEST_CTX, h_samps)
+            ctx_p      = pitch_raw[cut - h_samps : cut].astype(np.float32)
+            a_rf, p_rf = tfm_predict(model, roll_fast, cut, BEST_CTX, h_samps)
+            a_rs, p_rs = tfm_predict(model, roll_slow, cut, CTX_360,  h_samps)
+            a_roll     = roll_raw[cut : cut + h_samps]
+            p_roll     = p_rf + p_rs
+            ctx_roll   = roll_raw[cut - h_samps : cut].astype(np.float32)
+            hor_results.append({
+                "horizon_sec": h_sec, "window": i + 1,
+                "mae_pitch":  mean_absolute_error(a_p, p_p),
+                "mae_roll":   mean_absolute_error(a_roll, p_roll),
+                "rmse_pitch": float(np.sqrt(mean_squared_error(a_p, p_p))),
+                "rmse_roll":  float(np.sqrt(mean_squared_error(a_roll, p_roll))),
+            })
+            store_hor[h_sec].append(dict(
+                a_pitch=a_p,  p_pitch=p_p,  ctx_pitch=ctx_p,
+                a_roll=a_roll, p_roll=p_roll, ctx_roll=ctx_roll,
+            ))
+
+    hor_df  = pd.DataFrame(hor_results)
+    hor_sum = hor_df.groupby("horizon_sec").agg(
+        pitch_mean=("mae_pitch","mean"), pitch_std=("mae_pitch","std"),
+        roll_mean =("mae_roll", "mean"), roll_std =("mae_roll", "std"),
+        pitch_rmse=("rmse_pitch","mean"), roll_rmse=("rmse_roll","mean"),
+    ).reset_index()
+
+    progress.progress(85, text="Computing statistical metrics...")
+
+    # ── Step 8: Statistical metrics ───────────────────────────────────────────────
+    STAT_METRICS = ["Peak", "RMS", "H1/3"]
+    all_stat_rows = []
+
+    for sig_label, key_ctx, key_a, key_p in [
+        ("Pitch","ctx_pitch","a_pitch","p_pitch"),
+        ("Roll", "ctx_roll", "a_roll", "p_roll"),
+    ]:
+        for h_sec in HORIZONS_SEC:
+            wins = store_hor[h_sec]
+            for metric in STAT_METRICS:
+                inp_v  = [stat_fn(w[key_ctx], metric) for w in wins]
+                tru_v  = [stat_fn(w[key_a],   metric) for w in wins]
+                prd_v  = [stat_fn(w[key_p],   metric) for w in wins]
+                abspct = [abs(p-t)/(t+1e-9)*100 for p,t in zip(prd_v, tru_v)]
+                all_stat_rows.append({
+                    "Signal": sig_label, "Horizon_sec": h_sec, "Metric": metric,
+                    "Input_mean":  round(np.mean(inp_v), 4),
+                    "Pred_mean":   round(np.mean(prd_v), 4),
+                    "True_mean":   round(np.mean(tru_v), 4),
+                    "AbsErr_pct":  round(np.mean(abspct), 2),
+                    "Std_pct":     round(np.std(abspct),  2),
+                })
+
+    stat_df = pd.DataFrame(all_stat_rows)
+
+    progress.progress(100, text="Done.")
+    progress.empty()
+
+    # ── Store all results in session state ───────────────────────────────────────
+    st.session_state.results_ready = True
+    N_WINDOWS = n_windows
+    st.session_state.pipeline_data = {
+        "df_raw": df_raw, "df_rs": df_rs, "df": df, "df_clean": df_clean,
+        "FS": FS, "FS_RS": FS_RS, "FS_ORIG": FS_ORIG, "FS_RAW": FS_RAW,
+        "DT_MEAN": DT_MEAN, "DT_STD": DT_STD, "CV": CV,
+        "DUR_MIN": DUR_MIN, "ts": ts, "dt": dt,
+        "outlier_log": outlier_log,
+        "decomp_residual": decomp_residual, "decomp_corr": decomp_corr,
+        "ctx_sum": ctx_sum, "BEST_CTX_SEC": BEST_CTX_SEC, "BEST_CTX": BEST_CTX,
+        "hor_df": hor_df, "hor_sum": hor_sum, "HORIZONS_SEC": HORIZONS_SEC,
+        "store_hor": store_hor, "stat_df": stat_df,
+        "roll_raw": roll_raw, "roll_slow": roll_slow,
+        "roll_fast": roll_fast, "pitch_raw": pitch_raw,
+        "CTX_120": CTX_120, "CTX_360": CTX_360,
+        "CONTEXT_LENGTHS_SEC": CONTEXT_LENGTHS_SEC,
+        "n_windows": n_windows, "filename": uploaded.name,
+        "STAT_METRICS": ["Peak", "RMS", "H1/3"],
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # RESULTS DISPLAY — load from session state if already computed
+    # ══════════════════════════════════════════════════════════════════════════════
 
 tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔴 Live Prediction",
