@@ -185,6 +185,7 @@ n   = len(dt)
 DT_MEAN = dt.mean()
 DT_STD  = dt.std()
 CV      = DT_STD / DT_MEAN
+FS_ORIG = 1.0 / DT_MEAN   # estimated original sampling rate
 
 progress.progress(10, text="Resampling to 20 Hz...")
 
@@ -371,6 +372,7 @@ st.session_state.pipeline_data = {
     "CTX_120": CTX_120, "CTX_360": CTX_360,
     "CONTEXT_LENGTHS_SEC": CONTEXT_LENGTHS_SEC,
     "n_windows": n_windows, "filename": uploaded.name,
+    "STAT_METRICS": ["Peak", "RMS", "H1/3"],
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -398,7 +400,7 @@ if st.session_state.results_ready and not run_btn:
     CONTEXT_LENGTHS_SEC = d["CONTEXT_LENGTHS_SEC"]
     n_windows        = d["n_windows"]
     N_WINDOWS        = n_windows
-    STAT_METRICS     = ["Peak", "RMS", "H1/3"]
+    STAT_METRICS     = d.get("STAT_METRICS", ["Peak", "RMS", "H1/3"])
     model            = load_model()
 
 tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
