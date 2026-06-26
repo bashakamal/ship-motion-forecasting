@@ -301,39 +301,49 @@ with tab_pred:
     # ── QUALITATIVE GRAPH ─────────────────────────────────────────────────────
     st.markdown("### Qualitative view — predicted motion")
     st.caption("Gray = recorded past · black dashed = NOW · coloured dashed = predicted "
-               "future · ★ marks the predicted peak (largest |angle|) of the longest horizon.")
+               "future · ★ marks the predicted peak (largest |angle|) **within that "
+               "horizon's forecast window**. One panel per horizon so short forecasts "
+               "stay visible.")
 
+    # show the last `tail_sec` of context so short horizons aren't dwarfed
     for sig_label, ctx_sig, pred_key in [("Roll", ctx_roll, "p_roll"),
                                          ("Pitch", ctx_pitch, "p_pitch")]:
-        fig, ax = plt.subplots(figsize=(15, 4))
-        ax.plot(t_ctx, ctx_sig, color="gray", lw=1.0,
-                label=f"Recorded (last {ctx_sec}s)", zorder=3)
-        ax.axvline(ctx_sec, color="black", lw=1.5, ls="--", zorder=4, label="NOW")
-        ax.axvspan(ctx_sec, ctx_sec + max(horizons), alpha=0.04, color="#185FA5")
-
+        fig, axes = plt.subplots(len(horizons), 1,
+                                 figsize=(15, 3.2 * len(horizons)), squeeze=False)
+        axes = axes[:, 0]
         for i, h_sec in enumerate(horizons):
+            ax = axes[i]
             r = results[h_sec]
-            ax.plot(r["t_pred"], r[pred_key],
-                    color=HORIZON_COLORS[i % len(HORIZON_COLORS)],
-                    lw=1.8, ls="--", label=f"Predict next {h_sec}s", zorder=5)
+            color = HORIZON_COLORS[i % len(HORIZON_COLORS)]
 
-        # mark peak of the longest horizon for a clear stakeholder takeaway
-        long_h = horizons[-1]
-        rr = results[long_h]
-        pk_i = int(np.argmax(np.abs(rr[pred_key])))
-        pk_t = rr["t_pred"][pk_i]; pk_v = rr[pred_key][pk_i]
-        ax.scatter([pk_t], [pk_v], marker="*", s=220, color="#D81B60", zorder=6,
-                   label=f"Predicted peak {abs(pk_v):.2f}°")
-        ax.annotate(f"peak {abs(pk_v):.2f}°", (pk_t, pk_v),
-                    textcoords="offset points", xytext=(8, 8),
-                    fontsize=9, color="#D81B60", fontweight="bold")
+            # context tail: show ~3x the horizon (min 15s) of history for scale
+            tail_sec = max(15, h_sec * 3)
+            tail_n = int(tail_sec * FS)
+            t_tail = t_ctx[-tail_n:]
+            c_tail = ctx_sig[-tail_n:]
 
-        ax.set_xlabel("Time (s)   [0 = start of context window]")
-        ax.set_ylabel(f"{sig_label} angle (deg)")
-        ax.set_title(f"{sig_label} — recorded history + predicted future "
-                     f"(context = last {ctx_sec}s)")
-        ax.legend(fontsize=8, loc="upper left",
-                  ncol=min(4, len(horizons) + 2))
+            ax.plot(t_tail, c_tail, color="gray", lw=1.0,
+                    label=f"Recorded (last {tail_sec:.0f}s)", zorder=3)
+            ax.axvline(ctx_sec, color="black", lw=1.5, ls="--", zorder=4, label="NOW")
+            ax.axvspan(ctx_sec, ctx_sec + h_sec, alpha=0.06, color=color)
+            ax.plot(r["t_pred"], r[pred_key], color=color, lw=2.0, ls="--",
+                    label=f"Predict next {h_sec}s", zorder=5)
+
+            # peak computed ONLY over this horizon's predicted samples
+            pred = r[pred_key]
+            pk_i = int(np.argmax(np.abs(pred)))
+            pk_t = r["t_pred"][pk_i]; pk_v = pred[pk_i]
+            ax.scatter([pk_t], [pk_v], marker="*", s=200, color="#D81B60", zorder=6,
+                       label=f"Predicted peak {abs(pk_v):.2f}°")
+            ax.annotate(f"{abs(pk_v):.2f}°", (pk_t, pk_v),
+                        textcoords="offset points", xytext=(8, 6),
+                        fontsize=9, color="#D81B60", fontweight="bold")
+
+            ax.set_ylabel(f"{sig_label} (deg)")
+            ax.set_title(f"{sig_label} — next {h_sec}s forecast")
+            ax.legend(fontsize=8, loc="upper left", ncol=4)
+            if i == len(horizons) - 1:
+                ax.set_xlabel("Time (s)   [0 = start of context window]")
         plt.tight_layout()
         st.pyplot(fig, use_container_width=True)
         plt.close()
