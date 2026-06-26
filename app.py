@@ -301,9 +301,8 @@ with tab_pred:
     # ── QUALITATIVE GRAPH ─────────────────────────────────────────────────────
     st.markdown("### Qualitative view — predicted motion")
     st.caption("Gray = recorded past · black dashed = NOW · coloured dashed = predicted "
-               "future · ★ marks the predicted peak (largest |angle|) **within that "
-               "horizon's forecast window**. One panel per horizon so short forecasts "
-               "stay visible.")
+               "future. One panel per horizon so short forecasts stay visible. "
+               "Peak / RMS values are in the table below.")
 
     # show the last `tail_sec` of context so short horizons aren't dwarfed
     for sig_label, ctx_sig, pred_key in [("Roll", ctx_roll, "p_roll"),
@@ -328,16 +327,6 @@ with tab_pred:
             ax.axvspan(ctx_sec, ctx_sec + h_sec, alpha=0.06, color=color)
             ax.plot(r["t_pred"], r[pred_key], color=color, lw=2.0, ls="--",
                     label=f"Predict next {h_sec}s", zorder=5)
-
-            # peak computed ONLY over this horizon's predicted samples
-            pred = r[pred_key]
-            pk_i = int(np.argmax(np.abs(pred)))
-            pk_t = r["t_pred"][pk_i]; pk_v = pred[pk_i]
-            ax.scatter([pk_t], [pk_v], marker="*", s=200, color="#D81B60", zorder=6,
-                       label=f"Predicted peak {abs(pk_v):.2f}°")
-            ax.annotate(f"{abs(pk_v):.2f}°", (pk_t, pk_v),
-                        textcoords="offset points", xytext=(8, 6),
-                        fontsize=9, color="#D81B60", fontweight="bold")
 
             ax.set_ylabel(f"{sig_label} (deg)")
             ax.set_title(f"{sig_label} — next {h_sec}s forecast")
