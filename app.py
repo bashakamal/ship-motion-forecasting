@@ -120,7 +120,7 @@ if not st.session_state.ready and not run_btn:
         st.info("Upload an IMU CSV file in the sidebar and click **Run pipeline**.")
         st.markdown("""
 **What this app does:**
-1. Checks timestamp uniformity and resamples to exact 20 Hz
+1. Checks timestamp uniformity and resamples to 10 or 20 Hz (auto-detected)
 2. Removes sensor outliers and applies Butterworth filtering
 3. Decomposes roll into slow sway + fast wave components
 4. Runs TimesFM zero-shot forecasting at your chosen horizon
@@ -166,8 +166,17 @@ if run_btn:
     DT_MEAN = dt.mean(); DT_STD = dt.std(); CV = DT_STD/DT_MEAN
     FS_ORIG = 1.0/DT_MEAN
 
-    progress.progress(10, text="Resampling to 20 Hz...")
-    TARGET_HZ = 20.0
+    # ── Auto-detect target Hz from data ─────────────────────────────────────
+    # If data is already at 10 Hz (mean dt ~0.10s) → keep at 10 Hz (no upsampling)
+    # If data is at 20 Hz or has jitter → resample to 20 Hz
+    # Rule: use the nearest standard rate (10 or 20 Hz) to the original rate
+    _estimated_hz = 1.0 / DT_MEAN
+    if _estimated_hz < 15.0:
+        TARGET_HZ = 10.0   # 10 Hz data — keep native rate
+    else:
+        TARGET_HZ = 20.0   # 20 Hz or jittered — standardise to 20 Hz
+
+    progress.progress(10, text=f"Resampling to {TARGET_HZ:.0f} Hz...")
     IMU_COLS  = ["roll_deg","pitch_deg","yaw_deg","ax","ay","az","gx","gy","gz"]
     t0, t1    = ts[0], ts[-1]
     t_uniform = np.arange(t0, t1, 1.0/TARGET_HZ)
@@ -608,7 +617,7 @@ with tab1:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Raw samples",      f"{len(df_raw):,}")
-    c2.metric("Resampled (20 Hz)",f"{len(df_rs):,}")
+    c2.metric(f"Resampled ({TARGET_HZ:.0f} Hz)",f"{len(df_rs):,}")
     c3.metric("Duration",         f"{DUR_MIN:.1f} min")
     c4.metric("Original rate",    f"{FS_RAW:.2f} Hz")
 
@@ -619,7 +628,7 @@ with tab1:
     c8.metric("Max gap",  f"{dt.max():.4f} s")
 
     if CV > 0.05:
-        st.warning(f"CV = {CV:.4f} - significant jitter detected. Resampling to exact 20 Hz was applied automatically.")
+        st.warning(f"CV = {CV:.4f} - significant jitter detected. Resampling to exact {TARGET_HZ:.0f} Hz was applied automatically.")
     else:
         st.success(f"CV = {CV:.4f} - timestamps near-uniform.")
 
@@ -675,12 +684,12 @@ with tab1:
     for row, col in enumerate(["roll_deg","pitch_deg"]):
         if col not in df_raw.columns: continue
         s_orig = df_raw[col].values - df_raw[col].mean()
-        f_o, p_o = welch(s_orig, fs=FS_ORIG, nperseg=4096, noverlap=2048)
+        f_o, p_o = welch(s_orig, fs=FS_ORIG, nperseg=min(4096, len(s_orig)//4), noverlap=None)
         s_rs = df_rs[col].values - df_rs[col].mean()
-        f_r, p_r = welch(s_rs, fs=FS_RS, nperseg=4096, noverlap=2048)
+        f_r, p_r = welch(s_rs, fs=FS_RS, nperseg=min(4096, len(s_rs)//4), noverlap=None)
         for ax, f, p, lbl, color in [
             (axes[row,0], f_o, p_o, "Original", "#185FA5"),
-            (axes[row,1], f_r, p_r, "Resampled (20 Hz)", "#D85A30"),
+            (axes[row,1], f_r, p_r, f"Resampled ({TARGET_HZ:.0f} Hz)", "#D85A30"),
         ]:
             ax.semilogy(f, p, color=color, lw=0.9)
             ax.set_xlim([0, 2.0])
@@ -946,13 +955,13 @@ Channels available : {", ".join([c for c in ["roll_deg","pitch_deg","yaw_deg","g
 
 STEP 1 — TIMESTAMP QUALITY
 --------------------------
-Original sampling rate : {FS_RAW:.3f} Hz  (target: 20.0 Hz)
+Original sampling rate : {FS_RAW:.3f} Hz  (target: {TARGET_HZ:.0f} Hz)
 Timing jitter (CV)     : {CV:.4f}  (above 0.05 = resampling required)
 Verdict                : {"Resampling was required" if CV > 0.05 else "Near-uniform — resampling applied as precaution"}
 
 STEP 2 — RESAMPLING
 -------------------
-Resampled to        : 20.0 Hz (0.05 s uniform intervals)
+Resampled to        : {TARGET_HZ:.0f} Hz ({1/TARGET_HZ:.3f} s uniform intervals)
 Resampled samples   : {len(df_rs):,}
 Duration preserved  : {df_rs["time_sec"].iloc[-1]:.1f} s
 
