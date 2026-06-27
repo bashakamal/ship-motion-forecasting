@@ -81,9 +81,14 @@ def load_model():
 
 def tfm_predict(model, signal, cut, ctx_len, horizon):
     """Forecast `horizon` samples after `cut`, using `ctx_len` samples of history.
-    Returns (actual_future_or_None, prediction)."""
+    Returns (actual_future_or_None, prediction).
+    Recompiles only when the (context, horizon) shape changes — compile is
+    expensive, so skipping it when the shape repeats is a big speed-up."""
     from timesfm import ForecastConfig
-    model.compile(ForecastConfig(max_context=ctx_len, max_horizon=horizon))
+    shape = (ctx_len, horizon)
+    if st.session_state.get("_compiled_shape") != shape:
+        model.compile(ForecastConfig(max_context=ctx_len, max_horizon=horizon))
+        st.session_state["_compiled_shape"] = shape
     ctx = signal[cut - ctx_len:cut].astype(np.float32)
     local_mean = ctx.mean()
     forecast, _ = model.forecast(horizon=horizon, inputs=[ctx - local_mean])
@@ -91,6 +96,16 @@ def tfm_predict(model, signal, cut, ctx_len, horizon):
     actual = (signal[cut:cut + horizon].astype(np.float32)
               if cut + horizon <= len(signal) else None)
     return actual, pred
+
+def tfm_cached(model, signal, sig_name, cut, ctx_len, horizon):
+    """Cached wrapper — the same (signal, cut, context, horizon) is never
+    recomputed. Cache lives in session_state, cleared on new file load. This is
+    what makes tab-switching and tweaking selections instant."""
+    cache = st.session_state.setdefault("_fc_cache", {})
+    key = (sig_name, int(cut), int(ctx_len), int(horizon))
+    if key not in cache:
+        cache[key] = tfm_predict(model, signal, cut, ctx_len, horizon)
+    return cache[key]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -101,11 +116,12 @@ with st.sidebar:
     st.divider()
 
     uploaded = st.file_uploader("Upload IMU CSV", type=["csv"],
-                                help="Required: timestamp (Unix s), roll_deg, pitch_deg. Optional: accn_z (heave)")
+                                help="Required: timestamp (Unix s), roll_deg, pitch_deg. Optional: az (heave)")
 
     st.subheader("Evaluation settings")
     st.caption("Used only for the Statistics tab (needs ground truth).")
-    n_windows = st.slider("Evaluation windows", 3, 10, 5)
+    n_windows = st.slider("Evaluation windows", 3, 10, 3,
+                          help="More windows = more reliable stats but slower.")
 
     run_btn = st.button("Load & prepare data", type="primary", use_container_width=True)
 
@@ -113,11 +129,12 @@ with st.sidebar:
         if st.button("Clear / upload new file", use_container_width=True):
             st.session_state.ready = False
             st.session_state.data = {}
+            st.session_state["_fc_cache"] = {}
             st.rerun()
 
     st.divider()
     st.caption("Columns: `timestamp` or `time_sec`, `roll_deg`, `pitch_deg`. "
-               "Optional: `accn_z` (heave accel), `yaw_deg`, `gx`, `gy`, `gz`.")
+               "Optional: `az` (heave accel), `yaw_deg`, `gx`, `gy`, `gz`.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # WELCOME
@@ -141,12 +158,12 @@ if not st.session_state.ready and not run_btn:
 
 **Data format:**
 ```
-timestamp,roll_deg,pitch_deg,accn_z
-1764676000.00,-5.845,-3.808,0.214
-1764676000.05,-5.539,-4.089,0.187
+timestamp,roll_deg,pitch_deg,az
+1764676000.00,-5.845,-3.808,9.228
+1764676000.05,-5.539,-4.089,9.150
 ```
-`accn_z` (heave acceleration, m/s²) is optional — include it and roll, pitch **and
-heave** are all predicted; leave it out and the app runs on roll + pitch only.
+`az` (vertical/heave acceleration) is optional — include it and roll, pitch **and
+heave** are predicted; leave it out and the app runs on roll + pitch only.
 """)
     st.stop()
 
@@ -168,8 +185,8 @@ if run_btn:
         if col not in df_raw.columns:
             st.error(f"Missing required column: {col}"); st.stop()
 
-    # Optional heave acceleration — accept common aliases, standardise to 'accn_z'
-    HEAVE_ALIASES = ["accn_z", "acc_z", "az", "accel_z", "acceleration_z",
+    # Optional heave vertical acceleration — accept 'az' and common aliases
+    HEAVE_ALIASES = ["az", "accn_z", "acc_z", "accel_z", "acceleration_z",
                      "heave_acc", "heave_accel", "heave"]
     heave_col = next((c for c in HEAVE_ALIASES if c in df_raw.columns), None)
     if heave_col and heave_col != "accn_z":
@@ -217,7 +234,8 @@ if run_btn:
         "pitch_deg": df["pitch_filt"].values,
     }
     if has_heave:
-        # Heave is an acceleration: low-pass to wave band, remove DC/gravity offset
+        # az includes gravity (~9.81). Low-pass to wave band, then subtract the
+        # mean so heave oscillates about zero (true vertical motion).
         hz = butter_lp(df["accn_z"].values, 2.0, FS)
         clean_dict["accn_z"] = (hz - np.mean(hz)).astype(np.float32)
     df_clean = pd.DataFrame(clean_dict)
@@ -231,6 +249,8 @@ if run_btn:
         n_windows=n_windows, filename=uploaded.name, has_heave=has_heave,
     )
     st.session_state.ready = True
+    st.session_state["_fc_cache"] = {}          # fresh data → drop old forecasts
+    st.session_state["_compiled_shape"] = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UNPACK
@@ -252,7 +272,7 @@ CTX_360 = int(360 * FS)
 model = load_model()
 
 st.caption(f"File: **{d['filename']}**  ·  {DUR_MIN:.1f} min  ·  {TARGET_HZ:.0f} Hz  ·  "
-           f"{len(df_clean):,} samples  ·  Heave (accn_z): "
+           f"{len(df_clean):,} samples  ·  Heave (az): "
            f"{'✅ available' if has_heave else '— not in file'}")
 
 tab_pred, tab_stats, tab_analytics = st.tabs([
@@ -309,31 +329,31 @@ with tab_pred:
     bar = st.progress(0, text="Forecasting...")
     for ki, h_sec in enumerate(horizons):
         h_samps = int(h_sec * FS)
-        _, p_p  = tfm_predict(model, pitch_raw, cut, ctx, h_samps)
-        _, p_rf = tfm_predict(model, roll_fast, cut, ctx, h_samps)
+        _, p_p  = tfm_cached(model, pitch_raw, "pitch", cut, ctx, h_samps)
+        _, p_rf = tfm_cached(model, roll_fast, "roll_fast", cut, ctx, h_samps)
         c360    = min(CTX_360, cut)
-        _, p_rs = tfm_predict(model, roll_slow, cut, c360, h_samps)
+        _, p_rs = tfm_cached(model, roll_slow, "roll_slow", cut, c360, h_samps)
         p_roll  = p_rf + p_rs
         t_pred  = ctx_sec + np.arange(h_samps) / FS
         res = dict(p_pitch=p_p, p_roll=p_roll, t_pred=t_pred, h_samps=h_samps)
         if has_heave:
-            _, p_h = tfm_predict(model, heave_raw, cut, ctx, h_samps)
+            _, p_h = tfm_cached(model, heave_raw, "heave", cut, ctx, h_samps)
             res["p_heave"] = p_h
         results[h_sec] = res
         bar.progress((ki + 1) / len(horizons), text=f"Predicted next {h_sec}s...")
     bar.empty()
+
+    # signals to plot/tabulate: (label, context, prediction key, unit)
+    sig_specs = [("Roll", ctx_roll, "p_roll", "deg"),
+                 ("Pitch", ctx_pitch, "p_pitch", "deg")]
+    if has_heave:
+        sig_specs.append(("Heave", ctx_heave, "p_heave", "m/s²"))
 
     # ── QUALITATIVE GRAPH ─────────────────────────────────────────────────────
     st.markdown("### Qualitative view — predicted motion")
     st.caption("Gray = recorded past · black dashed = NOW · coloured dashed = predicted "
                "future. One panel per horizon so short forecasts stay visible. "
                "Peak / RMS values are in the table below.")
-
-    # (label, context signal, prediction key, unit) — heave added if present
-    sig_specs = [("Roll", ctx_roll, "p_roll", "deg"),
-                 ("Pitch", ctx_pitch, "p_pitch", "deg")]
-    if has_heave:
-        sig_specs.append(("Heave", ctx_heave, "p_heave", "m/s²"))
 
     # show the last `tail_sec` of context so short horizons aren't dwarfed
     for sig_label, ctx_sig, pred_key, unit in sig_specs:
@@ -408,7 +428,7 @@ with tab_pred:
                    "pred_roll_deg": round(float(pr), 4),
                    "pred_pitch_deg": round(float(pp), 4)}
             if has_heave:
-                row["pred_heave_accn_z_ms2"] = round(float(r["p_heave"][j]), 4)
+                row["pred_heave_ms2"] = round(float(r["p_heave"][j]), 4)
             dl_rows.append(row)
     st.download_button("Download predictions (CSV)",
                        data=pd.DataFrame(dl_rows).to_csv(index=False),
@@ -428,8 +448,9 @@ with tab_stats:
         options=CONTEXT_OPTIONS, value=120,
         format_func=lambda x: f"{x}s", key="s_ctx")
     stat_horizons = st.multiselect(
-        "Horizons to evaluate", options=HORIZON_OPTIONS, default=[3, 6, 10, 30],
-        format_func=lambda x: f"{x}s", key="s_hor")
+        "Horizons to evaluate", options=HORIZON_OPTIONS, default=[3, 6, 10],
+        format_func=lambda x: f"{x}s", key="s_hor",
+        help="Each horizon × each window is a separate forecast — more = slower.")
 
     if not stat_horizons:
         st.warning("Select at least one horizon.")
@@ -458,15 +479,15 @@ with tab_stats:
         acc = {sig: {m: {"true": [], "pred": []} for m in STAT_METRICS}
                for sig in stat_signals}
         for cut in cut_points:
-            a_p, p_p   = tfm_predict(model, pitch_raw, cut, s_ctx, h_samps)
-            a_rf, p_rf = tfm_predict(model, roll_fast, cut, s_ctx, h_samps)
+            a_p, p_p   = tfm_cached(model, pitch_raw, "pitch", cut, s_ctx, h_samps)
+            a_rf, p_rf = tfm_cached(model, roll_fast, "roll_fast", cut, s_ctx, h_samps)
             c360       = min(CTX_360, cut)
-            a_rs, p_rs = tfm_predict(model, roll_slow, cut, c360, h_samps)
+            a_rs, p_rs = tfm_cached(model, roll_slow, "roll_slow", cut, c360, h_samps)
             a_roll = roll_raw[cut:cut + h_samps]
             p_roll = p_rf + p_rs
             pairs = [("Roll", a_roll, p_roll), ("Pitch", a_p, p_p)]
             if has_heave:
-                a_h, p_h = tfm_predict(model, heave_raw, cut, s_ctx, h_samps)
+                a_h, p_h = tfm_cached(model, heave_raw, "heave", cut, s_ctx, h_samps)
                 pairs.append(("Heave", a_h, p_h))
             for sig, a_sig, p_sig in pairs:
                 for m in STAT_METRICS:
