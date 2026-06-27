@@ -261,6 +261,7 @@ if not st.session_state.ready:
 d = st.session_state.data
 df_raw = d["df_raw"]; df_clean = d["df_clean"]
 FS = d["FS"]; TARGET_HZ = d["TARGET_HZ"]; DUR_MIN = d["DUR_MIN"]
+FS_RAW = d["FS_RAW"]; DT_MEAN = d["DT_MEAN"]; outlier_log = d["outlier_log"]
 n_windows = d["n_windows"]
 roll_raw  = df_clean["roll_deg"].values.astype(np.float32)
 roll_slow = df_clean["roll_slow"].values.astype(np.float32)
@@ -275,7 +276,8 @@ st.caption(f"File: **{d['filename']}**  ·  {DUR_MIN:.1f} min  ·  {TARGET_HZ:.0
            f"{len(df_clean):,} samples  ·  Heave (az): "
            f"{'✅ available' if has_heave else '— not in file'}")
 
-tab_pred, tab_stats, tab_analytics = st.tabs([
+tab_data, tab_pred, tab_stats, tab_analytics = st.tabs([
+    "🧭 Data Understanding",
     "🔮 Prediction",
     "📊 Statistics",
     "📈 Data Analytics",
@@ -286,6 +288,94 @@ HORIZON_OPTIONS = [3, 6, 10, 20, 30, 60, 120]
 CONTEXT_OPTIONS = [60, 120, 180, 240, 360]
 HORIZON_COLORS  = ["#185FA5", "#D85A30", "#3B6D11", "#534AB7",
                    "#BA7517", "#0D7A7A", "#993C1D"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 0 — DATA UNDERSTANDING  (raw overview + preprocessing steps applied)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_data:
+    st.subheader("Data Understanding")
+    st.caption("What was uploaded, and exactly how it was prepared before forecasting. "
+               "Use this to walk stakeholders through the data and the cleaning pipeline.")
+
+    # ── Recording overview ────────────────────────────────────────────────────
+    st.markdown("### Recording overview")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Duration", f"{DUR_MIN:.1f} min")
+    c2.metric("Raw samples", f"{len(df_raw):,}")
+    c3.metric("Raw rate", f"{FS_RAW:.1f} Hz")
+    c4.metric("Working rate", f"{TARGET_HZ:.0f} Hz")
+    motions = "Roll + Pitch" + (" + Heave (az)" if has_heave else "")
+    st.caption(f"Motions available for forecasting: **{motions}**  ·  "
+               f"average sample spacing in raw file: {DT_MEAN*1000:.1f} ms")
+
+    # ── Raw signal statistics ─────────────────────────────────────────────────
+    st.markdown("### Raw signal statistics (before cleaning)")
+    raw_specs = [("Roll", "roll_deg", "deg"), ("Pitch", "pitch_deg", "deg")]
+    if has_heave:
+        raw_specs.append(("Heave (az)", "accn_z", "m/s²"))
+    stat_tbl = []
+    for label, col, unit in raw_specs:
+        if col in df_raw.columns:
+            s = pd.to_numeric(df_raw[col], errors="coerce")
+            stat_tbl.append({
+                "Signal": label, "Unit": unit,
+                "Min": round(float(s.min()), 3), "Max": round(float(s.max()), 3),
+                "Mean": round(float(s.mean()), 3), "Std": round(float(s.std()), 3),
+                "Missing": int(s.isna().sum()),
+                "Outliers removed": int(outlier_log.get(col, 0)),
+            })
+    st.dataframe(pd.DataFrame(stat_tbl), use_container_width=True, hide_index=True)
+    st.caption("Note: heave (az) statistics here are the **raw** values, so the mean "
+               "includes gravity (~9.8 m/s²). Gravity is removed during preprocessing.")
+
+    # ── Raw signal preview ────────────────────────────────────────────────────
+    st.markdown("### Raw signal preview")
+    prev_sec = min(120, df_raw["time_sec"].iloc[-1])
+    mask = df_raw["time_sec"] <= prev_sec
+    fig, axes = plt.subplots(len(raw_specs), 1,
+                             figsize=(15, 2.4 * len(raw_specs)), squeeze=False)
+    axes = axes[:, 0]
+    for ax, (label, col, unit) in zip(axes, raw_specs):
+        if col in df_raw.columns:
+            ax.plot(df_raw["time_sec"][mask],
+                    pd.to_numeric(df_raw[col], errors="coerce")[mask],
+                    color="#185FA5", lw=0.8)
+        ax.set_ylabel(f"{label}\n({unit})")
+        ax.set_title(f"{label} — first {prev_sec:.0f}s of raw recording", fontsize=10)
+    axes[-1].set_xlabel("Time (s)")
+    plt.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close()
+
+    # ── Preprocessing steps applied ───────────────────────────────────────────
+    st.divider()
+    st.markdown("### Preprocessing steps applied")
+    st.caption("Every signal goes through this pipeline before it reaches the model.")
+
+    heave_step = ("" if not has_heave else
+                  "6. **Heave conditioning (az).** Low-pass filtered to the wave band "
+                  "(≤ 2 Hz) and de-meaned so gravity (~9.8 m/s²) is removed, leaving "
+                  "true vertical acceleration oscillating about zero.\n")
+    st.markdown(
+        "1. **Timestamp normalisation.** The time column is shifted so the recording "
+        "starts at t = 0, and the average sample rate is measured.\n"
+        f"2. **Uniform resampling.** The raw signal (~{FS_RAW:.1f} Hz, often slightly "
+        f"irregular) is linearly interpolated onto an even **{TARGET_HZ:.0f} Hz** grid "
+        "so every sample is equally spaced — required for the forecasting model.\n"
+        "3. **Outlier removal.** Points more than 3 standard deviations from the mean "
+        "are treated as spikes/dropouts, removed, and filled by interpolation "
+        "(counts shown in the table above).\n"
+        "4. **Low-pass filtering.** Roll and pitch are filtered at 2 Hz (4th-order "
+        "Butterworth) to remove high-frequency sensor noise while keeping the wave "
+        "motion.\n"
+        "5. **Roll decomposition.** Roll is split into a **slow** component (≤ 0.05 Hz "
+        "— slow sway/list, forecast from a longer 360 s context) and a **fast** "
+        "component (0.05–2 Hz — wave-driven roll). Forecasting each separately and "
+        "recombining improves roll accuracy.\n"
+        + heave_step
+    )
+    st.info("These steps run automatically when you click **Load & prepare data**. "
+            "The cleaned signals feed the Prediction, Statistics and Data Analytics tabs.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — PREDICTION  (qualitative graph + quantitative table)
@@ -441,7 +531,8 @@ with tab_stats:
     st.subheader("Statistical Accuracy — Peak · RMS · H1/3")
     st.caption("Same descriptors as the offline study. For each horizon the model "
                "predicts the Peak, RMS and H1/3 of the next window; we compare against "
-               "the true future and report **MAPE, MAE, MSE** across evaluation windows.")
+               "the true future and report **MAPE, MAE, MSE and RMSE** across "
+               "evaluation windows.")
 
     stat_ctx_sec = st.select_slider(
         "Context window for evaluation",
@@ -493,7 +584,7 @@ with tab_stats:
                 for m in STAT_METRICS:
                     acc[sig][m]["true"].append(stat_fn(a_sig, m))
                     acc[sig][m]["pred"].append(stat_fn(p_sig, m))
-        # reduce to MAPE / MAE / MSE
+        # reduce to MAPE / MAE / MSE / RMSE (RMSE = sqrt(MSE), as in Prediction.py)
         eps = 1e-8
         for sig in stat_signals:
             for m in STAT_METRICS:
@@ -502,12 +593,14 @@ with tab_stats:
                 mape = float(np.mean(np.abs((p - t) / (np.abs(t) + eps))) * 100)
                 mae  = float(mean_absolute_error(t, p))
                 mse  = float(mean_squared_error(t, p))
+                rmse = float(np.sqrt(mse))
                 rows.append({"Signal": sig, "Horizon": h_sec, "Metric": m,
                              "True_mean": round(float(t.mean()), 4),
                              "Pred_mean": round(float(p.mean()), 4),
                              "MAPE_%": round(mape, 2),
                              "MAE": round(mae, 4),
-                             "MSE": round(mse, 5)})
+                             "MSE": round(mse, 5),
+                             "RMSE": round(rmse, 4)})
         bar.progress((hi + 1) / total, text=f"Evaluated {h_sec}s...")
     bar.empty()
 
@@ -525,7 +618,8 @@ with tab_stats:
 
     st.divider()
     st.markdown("### Overall accuracy (averaged over all selected horizons)")
-    ov = (stat_df.groupby(["Signal", "Metric"])[["MAPE_%", "MAE", "MSE"]]
+    st.caption("MAPE / MAE / RMSE per descriptor — same summary style as the offline study.")
+    ov = (stat_df.groupby(["Signal", "Metric"])[["MAPE_%", "MAE", "RMSE", "MSE"]]
           .mean().round(4).reset_index()
           .rename(columns={"MAPE_%": "MAPE (%)"}))
     st.dataframe(ov, use_container_width=True, hide_index=True)
